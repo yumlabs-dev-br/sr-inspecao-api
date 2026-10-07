@@ -1,0 +1,141 @@
+openapi: 3.1.0
+info:
+  title: Serviço de inspeção visual
+  version: 1.0.0
+  description: Fotos das peças (multipart), decisão caixa/refugo/revisão, fila de revisão, relatório por lote e métricas.
+paths:
+  /saude:
+    get:
+      summary: O serviço está no ar
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: object, properties: { ok: { const: true } } } } } }
+  /fotos:
+    post:
+      summary: Recebe a foto de uma peça (Etapa 1) e decide o destino (Etapa 2)
+      parameters:
+        - { name: Idempotency-Key, in: header, required: false, description: "Etapa 2: o código da peça; o reenvio devolve a mesma foto (200)", schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [foto, peca, lote, camera]
+              properties:
+                foto: { type: string, format: binary, description: "PNG ou JPEG (pela assinatura dos bytes), até 2 MB" }
+                peca: { type: string, example: P-1042 }
+                lote: { type: string, example: L1-2 }
+                camera: { type: string, example: estacao-3 }
+                segundos: { type: integer, minimum: 0, maximum: 86400, description: "segundos do turno (padrão 0)" }
+      responses:
+        "201": { description: Foto criada (cabeçalho Location /fotos/{id}), content: { application/json: { schema: { $ref: "#/components/schemas/Foto" } } } }
+        "200": { description: Reenvio com a mesma Idempotency-Key (a mesma foto) }
+        "400": { $ref: "#/components/responses/Erro" }
+        "413": { $ref: "#/components/responses/Erro" }
+        "415": { $ref: "#/components/responses/Erro" }
+        "429": { description: "Etapa 4: a câmera passou de LIMITE_FOTOS_POR_MINUTO (cabeçalho Retry-After)" }
+    get:
+      summary: Lista as fotos na ordem de chegada (Etapa 1)
+      parameters:
+        - { name: lote, in: query, schema: { type: string } }
+        - { name: destino, in: query, schema: { $ref: "#/components/schemas/Destino" } }
+        - { name: pagina, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+        - { name: por_pagina, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+      responses:
+        "200": { description: Página, content: { application/json: { schema: { $ref: "#/components/schemas/PaginaFotos" } } } }
+        "400": { $ref: "#/components/responses/Erro" }
+  /fotos/{id}:
+    parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+    get:
+      summary: Os metadados de uma foto
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Foto" } } } }
+        "404": { $ref: "#/components/responses/Erro" }
+    patch:
+      summary: A revisão do supervisor (uma vez só) — Etapa 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [destino, supervisor, segundos]
+              properties:
+                destino: { enum: [caixa, refugo] }
+                supervisor: { type: string, example: bruno }
+                segundos: { type: integer }
+      responses:
+        "200": { description: Revisada, content: { application/json: { schema: { $ref: "#/components/schemas/Foto" } } } }
+        "400": { $ref: "#/components/responses/Erro" }
+        "404": { $ref: "#/components/responses/Erro" }
+        "409": { description: Já foi revisada }
+    delete:
+      summary: Apaga a foto (do bucket e do banco) — Etapa 3
+      responses:
+        "204": { description: Apagada }
+        "404": { $ref: "#/components/responses/Erro" }
+  /fotos/{id}/arquivo:
+    get:
+      summary: Os bytes da foto, com o Content-Type dela — Etapa 1
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        "200": { description: A foto, content: { image/png: {}, image/jpeg: {} } }
+        "404": { $ref: "#/components/responses/Erro" }
+  /fotos/{id}/url:
+    get:
+      summary: URL assinada para baixar direto do object storage — Etapa 3
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: object, properties: { url: { type: string }, expira_em_s: { type: integer, example: 300 } } } } } }
+  /lotes/{lote}:
+    get:
+      summary: O relatório do lote (destino atual de cada foto) — Etapa 2
+      parameters: [{ name: lote, in: path, required: true, schema: { type: string } }]
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: object, properties: { lote: { type: string }, pecas: { type: integer }, caixa: { type: integer }, refugo: { type: integer }, revisao: { type: integer } } } } } }
+        "404": { description: Lote sem fotos }
+  /metricas:
+    get:
+      summary: Os números do turno, calculados em SQL — Etapa 4
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  fotos: { type: integer }
+                  por_destino: { type: object, properties: { caixa: { type: integer }, refugo: { type: integer }, revisao: { type: integer } } }
+                  revisadas: { type: integer }
+                  prejuizo_esperado: { type: number, description: "soma, com 1 casa: revisada ou em revisão 3; caixa trinca × 40 + mancha × 10; refugo (1 − trinca − mancha) × 6" }
+                  espera_revisao_media_s: { type: [number, "null"], description: "média de revisada_em − criada_em das revisadas (1 casa)" }
+                  por_lote: { type: array, items: { type: object, properties: { lote: { type: string }, fotos: { type: integer }, refugo: { type: integer }, prejuizo_esperado: { type: number } } } }
+components:
+  schemas:
+    Destino: { enum: [caixa, refugo, revisao] }
+    Foto:
+      type: object
+      properties:
+        id: { type: string }
+        peca: { type: string }
+        lote: { type: string }
+        camera: { type: string }
+        tipo: { enum: [image/png, image/jpeg] }
+        bytes: { type: integer }
+        ia: { type: object, properties: { trinca: { type: number }, mancha: { type: number } } }
+        destino: { $ref: "#/components/schemas/Destino" }
+        criada_em: { type: integer }
+        revisada_em: { type: [integer, "null"] }
+        revisada_por: { type: [string, "null"] }
+    PaginaFotos:
+      type: object
+      properties:
+        itens: { type: array, items: { $ref: "#/components/schemas/Foto" } }
+        total: { type: integer }
+        pagina: { type: integer }
+        por_pagina: { type: integer }
+  responses:
+    Erro:
+      description: Erro
+      content: { application/json: { schema: { type: object, properties: { erro: { type: string } } } } }

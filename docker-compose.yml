@@ -1,0 +1,11 @@
+# Object storage compatível com S3 (Etapa 3): npm run s3  →  http://localhost:8333
+services:
+  seaweedfs:
+    image: chrislusf/seaweedfs:latest
+    command: server -s3 -dir=/data -ip.bind=0.0.0.0
+    ports:
+      - "8333:8333"
+    volumes:
+      - seaweedfs:/data
+volumes:
+  seaweedfs:
